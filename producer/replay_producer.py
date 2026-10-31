@@ -1,5 +1,6 @@
 import json
 import logging
+import argparse
 from datetime import datetime
 from decimal import Decimal
 
@@ -14,8 +15,8 @@ from ingestion.schemas import GroundTruthLabel, TransactionEvent, build_transact
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-RAW_TOPIC = "transaction.raw"
-DEADLETTER_TOPIC = "transaction.deadletter"
+RAW_TOPIC = "transactions.raw"
+DEADLETTER_TOPIC = "transactions.deadletter"
 BATCH_SIZE = 10_000
 
 
@@ -34,7 +35,7 @@ def delivery_report(err, msg):
 
 def build_deadletter_record(raw_row: dict, error: Exception) -> dict:
     return {
-        "failed at": datetime.utcnow().isoformat(),
+        "failed_at": datetime.utcnow().isoformat(),
         "error_reason": str(error),
         "raw_record": raw_row,
     }
@@ -61,7 +62,7 @@ def produce_from_csv(
     bootstrap_servers: str = "localhost:9092",
     pg_dsn: str = "dbname=streaming_fraud user=postgres host=localhost",
 ):
-    producer = Producer({"bootstrap_servers": bootstrap_servers})
+    producer = Producer({"bootstrap.servers": bootstrap_servers})
     pg_conn = psycopg2.connect(pg_dsn)
     df = pd.read_csv(csv_path)
 
@@ -73,7 +74,7 @@ def produce_from_csv(
 
         try:
             label_buffer.append(
-                GroundTruthLabel(Transaction_id=txn_id, is_fraud=row["Is Fraud?"])
+                GroundTruthLabel(transaction_id=txn_id, is_fraud=row["Is Fraud?"])
             )
         except ValidationError as e:
             logger.warning("Could not parse label for row %d: %s", idx, e)
@@ -105,7 +106,43 @@ def produce_from_csv(
 
         producer.poll(0)
 
+        if idx % 100_000 == 0 and idx > 0:
+            logger.info(
+                "Progress: %d rows processed (sent=%d, deadlettered=%d)",
+                idx,
+                sent,
+                deadlettered,
+            )
+
     flush_labels(pg_conn, label_buffer)
     producer.flush()
     pg_conn.close()
     logger.info("Done. sent=%d deadlettered=%d", sent, deadlettered)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Replay transaction CSV into Kafka")
+    parser.add_argument(
+        "--csv-path",
+        default="data/card_transaction.v1.csv",
+        help="Path to the source transactions CSV",
+    )
+    parser.add_argument(
+        "--bootstrap-servers", default="localhost:9092", help="Kafka bootstrap servers"
+    )
+    parser.add_argument(
+        "--pg-dsn",
+        default="dbname=streaming_fraud user=postgres password=postgres host=localhost",
+        help="Postgres connection string for ground_truth_labels",
+    )
+    args = parser.parse_args()
+
+    produce_from_csv(
+        csv_path=args.csv_path,
+        bootstrap_servers=args.bootstrap_servers,
+        pg_dsn=args.pg_dsn,
+    )
+
+
+if __name__ == "__main__":
+    main()

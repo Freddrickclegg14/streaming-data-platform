@@ -1,25 +1,45 @@
 import hashlib
+import math
 from datetime import datetime
 from decimal import Decimal
-from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+def _is_nan(v) -> bool:
+    return isinstance(v, float) and math.isnan(v)
 
 
 class TransactionEvent(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     transaction_id: str
     user_id: int = Field(..., alias="User")
     card_id: int = Field(..., alias="Card")
     event_timestamp: datetime
     amount: Decimal = Field(..., alias="Amount")
     use_chip: str = Field(..., alias="Use Chip")
-    merchant_name: str = Field(..., alias="Merchant Name")
+    merchant_id: int = Field(
+        ..., alias="Merchant Name"
+    )  # numeric ID in this dataset, not a real name
     merchant_city: str = Field(..., alias="Merchant City")
-    merchant_state: str = Field(..., alias="Merchant State")
+    merchant_state: str | None = Field(
+        None, alias="Merchant State"
+    )  # None for online txns
     zip_code: str | None = Field(None, alias="Zip")
     mcc: int = Field(..., alias="MCC")
     errors: str | None = Field(None, alias="Errors?")
-    # is_fraud: bool = Field(..., alias="Is Fraud?")
+    # is_fraud intentionally excluded - see GroundTruthLabel
+
+    @model_validator(mode="before")
+    @classmethod
+    def build_event_timestamp(cls, data):
+        if isinstance(data, dict) and "event_timestamp" not in data:
+            hour, minute = map(int, str(data["Time"]).split(":"))
+            data["event_timestamp"] = datetime(
+                int(data["Year"]), int(data["Month"]), int(data["Day"]), hour, minute
+            )
+        return data
 
     @field_validator("amount", mode="before")
     @classmethod
@@ -28,8 +48,19 @@ class TransactionEvent(BaseModel):
             return Decimal(v.replace("$", "").strip())
         return v
 
-    class Config:
-        population_by_name = True
+    @field_validator("zip_code", mode="before")
+    @classmethod
+    def parse_zip(cls, v):
+        if v is None or _is_nan(v):
+            return None
+        return str(int(v)) if isinstance(v, float) else str(v)
+
+    @field_validator("merchant_state", "errors", mode="before")
+    @classmethod
+    def parse_optional_str(cls, v):
+        if v is None or _is_nan(v):
+            return None
+        return str(v)
 
 
 class GroundTruthLabel(BaseModel):
