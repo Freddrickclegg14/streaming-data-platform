@@ -1,69 +1,75 @@
-import os
+# pyflink/velocity_check_job.py
 import json
 import logging
-from pyflink.common import WatermarkStrategy, Duration, Types
-from pyflink.common.serialization import SimpleStringSchema
-from pyflink.common.watermark_strategy import TimestampAssigner
-from pyflink.datastream import (
-    StreamExecutionEnvironment,
-    KeyedProcessFunction,
-    RuntimeContext,
-)
-from pyflink.datastream.state import ListStateDescriptor, ValueStateDescriptor
-from pyflink.datastream.connectors.kafka import KafkaSource, KafkaOffsetsInitializer
-import psycopg2
+from datetime import datetime
 
+import psycopg2
+from pyflink.common import Duration
+from pyflink.common.typeinfo import Types
+from pyflink.common.watermark_strategy import WatermarkStrategy, TimestampAssigner
+from pyflink.datastream import StreamExecutionEnvironment
+from pyflink.datastream.functions import KeyedProcessFunction, RuntimeContext
+from pyflink.datastream.state import ListStateDescriptor
+from pyflink.datastream.connectors.kafka import KafkaSource, KafkaOffsetsInitializer
+from pyflink.common.serialization import SimpleStringSchema
+
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 VELOCITY_THRESHOLD = 5
-VELOCITY_WINDOW_MS = 600 * 1000
-PG_DSN = os.environ["PG_DSN"]
+VELOCITY_WINDOW_SECONDS = 600
+PG_DSN = "dbname=streaming_fraud user=postgres password=postgres host=postgres"
+KAFKA_JAR = "file:///C:/Users/User/Desktop/data-engineering-portfolio/streaming-data-platform/pyflink_jars/flink-sql-connector-kafka-5.0.0-2.1.jar"
+
+
+class EventTimestampAssigner(TimestampAssigner):
+    def extract_timestamp(self, event: dict, record_timestamp):
+        dt = datetime.fromisoformat(event["event_timestamp"])
+        return int(dt.timestamp() * 1000)
 
 
 class VelocityCheckFunction(KeyedProcessFunction):
-    def open(self, rc: RuntimeContext):
-        self.ts_state = rc.get_list_state(
-            ListStateDescriptor("recent_ts", Types.LONG())
-        )
-        self.flagged_state = rc.get_value_state(
-            ValueStateDescriptor("flagged", Types.BOOLEAN())
+    def open(self, runtime_context: RuntimeContext):
+        self.timestamps_state = runtime_context.get_list_state(
+            ListStateDescriptor("recent_timestamps", Types.LONG())
         )
         self.pg_conn = psycopg2.connect(PG_DSN)
 
-    def close(self):
-        if getattr(self, "pg_conn", None):
-            self.pg_conn.close()
+    def process_element(self, event: dict, ctx: "KeyedProcessFunction.Context"):
+        current_ts = ctx.timestamp()
+        window_start = current_ts - (VELOCITY_WINDOW_SECONDS * 1000)
 
-    def process_element(self, event, ctx):
-        now = ctx.timestamp() or 0
-        cutoff = now - VELOCITY_WINDOW_MS
+        existing = list(self.timestamps_state.get()) or []
+        recent = [ts for ts in existing if ts >= window_start] + [current_ts]
+        self.timestamps_state.update(recent)
 
-        # add current; prune anything older than cutoff
-        ts_list = [t for t in (self.ts_state.get() or []) if t >= cutoff]
-        ts_list.append(now)
-        self.ts_state.update(ts_list)
+        if len(recent) >= VELOCITY_THRESHOLD:
+            self._write_flag(event["transaction_id"], "velocity_check")
 
-        already = self.flagged_state.value() or False
-        if len(ts_list) >= VELOCITY_THRESHOLD and not already:
-            self._write_flags(ts_list, "velocity_check")
-            self.flagged_state.update(True)
-        elif len(ts_list) < VELOCITY_THRESHOLD:
-            self.flagged_state.update(False)
+    def _write_flag(self, transaction_id: str, rule: str):
+        with self.pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO fraud_flags (transaction_id, flagged_fraud, rule_triggered)
+                VALUES (%s, TRUE, %s)
+                ON CONFLICT (transaction_id) DO NOTHING
+                """,
+                (transaction_id, rule),
+            )
+        self.pg_conn.commit()
 
-    def _write_flags(self, timestamps, rule):
-        # If you need to flag each contributing txn, you must have stored
-        # (ts, txn_id) pairs, not just timestamps. Adjust state accordingly.
-        ...
+
+def parse_event(raw: str) -> dict:
+    return json.loads(raw)
 
 
 def run():
     env = StreamExecutionEnvironment.get_execution_environment()
-    env.enable_checkpointing(60_000)
-    env.add_jars(os.environ.get("FLINK_KAFKA_JAR", "file:///path/to/kafka.jar"))
+    env.add_jars(KAFKA_JAR)
 
-    source = (
+    kafka_source = (
         KafkaSource.builder()
-        .set_bootstrap_servers(os.environ.get("KAFKA_BROKERS", "localhost:9092"))
+        .set_bootstrap_servers("kafka:29092")
         .set_topics("transactions.raw")
         .set_group_id("velocity-check-job")
         .set_starting_offsets(KafkaOffsetsInitializer.earliest())
@@ -71,15 +77,20 @@ def run():
         .build()
     )
 
-    ws = WatermarkStrategy.for_bounded_out_of_orderness(
+    watermark_strategy = WatermarkStrategy.for_bounded_out_of_orderness(
         Duration.of_seconds(30)
     ).with_timestamp_assigner(EventTimestampAssigner())
 
-    stream = (
-        env.from_source(source, WatermarkStrategy.no_watermarks(), "kafka-source")
-        .map(lambda raw: json.loads(raw))
-        .assign_timestamps_and_watermarks(ws)
-        .key_by(lambda e: e["user_id"])
+    (
+        env.from_source(kafka_source, WatermarkStrategy.no_watermarks(), "kafka-source")
+        .map(parse_event, output_type=Types.PICKLED_BYTE_ARRAY())
+        .assign_timestamps_and_watermarks(watermark_strategy)
+        .key_by(lambda event: event["user_id"])
         .process(VelocityCheckFunction())
     )
+
     env.execute("velocity_check_job")
+
+
+if __name__ == "__main__":
+    run()
