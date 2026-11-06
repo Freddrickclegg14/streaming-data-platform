@@ -1,4 +1,3 @@
-# pyflink/velocity_check_job.py
 import json
 import logging
 from datetime import datetime
@@ -7,11 +6,15 @@ import psycopg2
 from pyflink.common import Duration
 from pyflink.common.typeinfo import Types
 from pyflink.common.watermark_strategy import WatermarkStrategy, TimestampAssigner
-from pyflink.datastream import StreamExecutionEnvironment
+from pyflink.datastream import StreamExecutionEnvironment, CheckpointingMode
 from pyflink.datastream.functions import KeyedProcessFunction, RuntimeContext
 from pyflink.datastream.state import ListStateDescriptor
 from pyflink.datastream.connectors.kafka import KafkaSource, KafkaOffsetsInitializer
+from pyflink.datastream.checkpoint_storage import FileSystemCheckpointStorage
 from pyflink.common.serialization import SimpleStringSchema
+from pyflink.common.restart_strategy import RestartStrategies
+
+from rules import check_velocity
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,7 +22,7 @@ logger = logging.getLogger(__name__)
 VELOCITY_THRESHOLD = 5
 VELOCITY_WINDOW_SECONDS = 600
 PG_DSN = "dbname=streaming_fraud user=postgres password=postgres host=postgres"
-KAFKA_JAR = "file:///C:/Users/User/Desktop/data-engineering-portfolio/streaming-data-platform/pyflink_jars/flink-sql-connector-kafka-5.0.0-2.1.jar"
+KAFKA_JAR = "file:///opt/flink/lib/custom/flink-sql-connector-kafka-5.0.0-2.1.jar"
 
 
 class EventTimestampAssigner(TimestampAssigner):
@@ -36,14 +39,12 @@ class VelocityCheckFunction(KeyedProcessFunction):
         self.pg_conn = psycopg2.connect(PG_DSN)
 
     def process_element(self, event: dict, ctx: "KeyedProcessFunction.Context"):
-        current_ts = ctx.timestamp()
-        window_start = current_ts - (VELOCITY_WINDOW_SECONDS * 1000)
-
         existing = list(self.timestamps_state.get()) or []
-        recent = [ts for ts in existing if ts >= window_start] + [current_ts]
+        is_violation, recent = check_velocity(
+            existing, ctx.timestamp(), VELOCITY_WINDOW_SECONDS, VELOCITY_THRESHOLD
+        )
         self.timestamps_state.update(recent)
-
-        if len(recent) >= VELOCITY_THRESHOLD:
+        if is_violation:
             self._write_flag(event["transaction_id"], "velocity_check")
 
     def _write_flag(self, transaction_id: str, rule: str):
@@ -52,7 +53,7 @@ class VelocityCheckFunction(KeyedProcessFunction):
                 """
                 INSERT INTO fraud_flags (transaction_id, flagged_fraud, rule_triggered)
                 VALUES (%s, TRUE, %s)
-                ON CONFLICT (transaction_id) DO NOTHING
+                ON CONFLICT (transaction_id, rule_triggered) DO NOTHING
                 """,
                 (transaction_id, rule),
             )
@@ -66,6 +67,18 @@ def parse_event(raw: str) -> dict:
 def run():
     env = StreamExecutionEnvironment.get_execution_environment()
     env.add_jars(KAFKA_JAR)
+    env.add_python_file("/opt/flink/usrlib/rules.py")
+
+    env.enable_checkpointing(60_000, CheckpointingMode.EXACTLY_ONCE)
+    checkpoint_config = env.get_checkpoint_config()
+    checkpoint_config.set_checkpoint_storage(
+        FileSystemCheckpointStorage("file:///opt/flink/usrlib/checkpoints")
+    )
+    checkpoint_config.set_min_pause_between_checkpoints(30_000)
+    checkpoint_config.set_checkpoint_timeout(120_000)
+    checkpoint_config.set_max_concurrent_checkpoints(1)
+
+    env.set_restart_strategy(RestartStrategies.fixed_delay_restart(3, 10_000))
 
     kafka_source = (
         KafkaSource.builder()

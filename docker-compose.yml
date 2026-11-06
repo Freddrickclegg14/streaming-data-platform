@@ -43,7 +43,7 @@ services:
   jobmanager:
     build:
       context: .
-      dockerfile: pyflink/Dockerfile
+      dockerfile: flink_jobs/Dockerfile
     container_name: jobmanager
     ports:
       - "8081:8081"
@@ -51,13 +51,13 @@ services:
     environment:
       - JOB_MANAGER_RPC_ADDRESS=jobmanager
     volumes:
-      - ./pyflink:/opt/flink/usrlib
+      - ./flink_jobs:/opt/flink/usrlib
       - ./pyflink_jars:/opt/flink/lib/custom
 
   taskmanager:
     build:
       context: .
-      dockerfile: pyflink/Dockerfile
+      dockerfile: flink_jobs/Dockerfile
     container_name: taskmanager
     command: taskmanager
     environment:
@@ -66,7 +66,7 @@ services:
     depends_on:
       - jobmanager
     volumes:
-      - ./pyflink:/opt/flink/usrlib
+      - ./flink_jobs:/opt/flink/usrlib
       - ./pyflink_jars:/opt/flink/lib/custom
 
 volumes:
