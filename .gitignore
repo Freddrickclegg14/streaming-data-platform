@@ -100,3 +100,4 @@ target/
 
 # Virtual environment
 .venv/
+flink_jobs/checkpoints/
