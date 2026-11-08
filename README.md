@@ -51,6 +51,52 @@ Both Flink jobs write concurrently to `fraud_flags`. Postgres's default **READ C
 
 Rule logic (`check_velocity`, `check_amount_anomaly`) is extracted into plain functions in `flink_jobs/rules.py`, independent of Flink's runtime — the `KeyedProcessFunction` classes call them and manage state, but the decision logic itself is unit-testable with plain pytest, no live cluster needed. Same pattern as the batch project's `test_schemas.py`.
 
+## Data modelling — and why there's no dbt here
+
+Unlike the batch project (a real multi-layer warehouse: staging models feeding several mart tables with tests and a lineage graph), this pipeline's data model is flat — `ground_truth_labels` and `fraud_flags` are two OLTP-shaped tables, not a dimensional model, and bronze/silver here are nearly identical since validation already happens at the producer (same asymmetry documented for yfinance on the batch side). The one real aggregate ("gold layer" equivalent) is a single Postgres view:
+
+```sql
+CREATE OR REPLACE VIEW rule_performance AS
+SELECT
+    f.rule_triggered,
+    COUNT(*) FILTER (WHERE g.is_fraud) AS true_positives,
+    COUNT(*) FILTER (WHERE NOT g.is_fraud) AS false_positives,
+    ROUND(COUNT(*) FILTER (WHERE g.is_fraud)::numeric / NULLIF(COUNT(*), 0) * 100, 2) AS precision_pct,
+    ROUND(COUNT(*) FILTER (WHERE g.is_fraud)::numeric
+        / NULLIF((SELECT COUNT(*) FROM ground_truth_labels WHERE is_fraud), 0) * 100, 2) AS recall_pct
+FROM fraud_flags f
+JOIN ground_truth_labels g USING (transaction_id)
+WHERE f.flagged_fraud
+GROUP BY f.rule_triggered;
+```
+
+`SELECT * FROM rule_performance;` reproduces the Results table below directly from live data — reproducible evidence, not a number to trust was copied correctly. Introducing dbt for one view would add orchestration machinery with nothing to orchestrate; it would earn its place if this grew into several related aggregate questions (e.g. performance by MCC, by hour of day), which is a natural extension, not built here.
+
+## Orchestration & CI/CD
+
+**CI** (`.github/workflows/ci.yml`) runs `ruff check` + `pytest` on every push — no cluster dependency, same pattern as batch's `ci.yml`.
+
+**Orchestration** (`kestra/streaming_pipeline.yml`) sequences the operational steps: run the producer, then submit both Flink jobs. This is a deliberately thinner orchestration story than the batch project's Prefect flow, and that's an architectural difference worth stating plainly rather than glossing over — batch's Prefect flow had real retryable, dependent transform tasks; here, the ongoing work (stream processing) happens inside already-running Flink jobs, not inside the orchestrator, so Kestra is sequencing one-off steps rather than managing a DAG of transformations.
+
+## Observability
+
+The Flink UI (`:8081`) already gives per-job records-in/out, checkpoint history, and exceptions — proven useful during actual debugging, not just a nice-to-have. The `rule_performance` view above is the business-metric observability that actually matters (is detection working), queryable on demand. A Prometheus/Grafana stack scraping Flink's metrics reporter is the natural next step for a "real" setup, but is meaningfully more infrastructure to maintain for a portfolio project — documented here as a deliberate stopping point, not an oversight.
+
+## Cloud deployment (Terraform)
+
+`terraform/` provisions a single GCE VM (e2-standard-4, Debian 12) in its own GCP project (`dolapo-de-portfolio-streaming`), running the same Docker Compose stack as local — scoped down from a "real" cloud topology (managed Kafka, a multi-node Flink cluster, managed Postgres) to match this project's portfolio scope, same honest-tradeoff pattern as batch's Terraform. Verified with a real `terraform apply` → smoke test (producer run against a tiny sample, Postgres write confirmed) → `terraform destroy`, not just written and left unverified. Three genuine, non-obvious infrastructure bugs surfaced during that smoke test, worth recording as the actual value of testing on real infra rather than assuming code is correct:
+
+1. **CRLF line endings in the Terraform-inlined startup script** caused the VM's boot script to fail silently (`exit status 127`, "required file not found" — the classic signature of a `\r` breaking a shebang line). Fixed by moving the script to a separate, LF-encoded `startup.sh` loaded via `file()`.
+2. **Debian 12's default apt repos don't carry `docker-compose-plugin` under that name.** Switched to Docker's official `get.docker.com` install script instead of fighting repo configuration for a disposable VM.
+3. **The project depended on plain `psycopg2`, which needs `pg_config` and a C compiler to build from source.** This worked by accident on Windows (a prebuilt wheel exists there) but failed hard on a bare Linux VM with no build toolchain. Fixed by switching to `psycopg2-binary` everywhere — a genuine cross-platform reproducibility fix, not just a cloud-specific workaround.
+
+```bash
+cd terraform
+terraform apply -var="my_ip=$(curl -s ifconfig.me)/32"
+# ... smoke test ...
+terraform destroy -var="my_ip=$(curl -s ifconfig.me)/32"
+```
+
 ## Results
 
 Evaluated against the full, duplicate-free 24,386,900-row dataset (29,757 true fraud cases, ~0.12% base rate):
@@ -73,6 +119,8 @@ Only 309 fraud cases were caught by both rules — limited redundancy, meaning t
 - **Single-broker Kafka, local-only** — no replication, no multi-broker failover. Changing broker listener configuration requires a full data-volume reset in this setup, which isn't representative of how a production cluster would handle it.
 - **Sink is a direct JDBC-style write via `psycopg2`, not Flink's native JDBC connector** — simpler, avoids a second Java connector dependency, but less idiomatic Flink.
 - **Dead-letter path is implemented and unit-tested but never exercised at scale** — the source data was too clean to trigger it.
+- **Cloud deployment is a single VM running everything**, not a production-shaped topology (separate managed Kafka, real Flink worker nodes, managed Postgres) — a deliberate scope decision for a portfolio project, documented rather than implied to be more than it is.
+- **No metrics dashboard (Prometheus/Grafana)** — the Flink UI and the `rule_performance` view cover what's needed to verify this pipeline works; a dedicated metrics stack is a reasonable next step, not built.
 
 ## Local setup
 

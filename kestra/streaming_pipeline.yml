@@ -1,0 +1,18 @@
+id: streaming_fraud_pipeline
+namespace: portfolio.streaming
+
+tasks:
+  - id: run_producer
+    type: io.kestra.plugin.scripts.shell.command
+    command: |
+      - uv run python -m producer.replay_producer --csv--path data/card_transaction.v1.csv
+    
+  - id: submit_velocity_check
+    type: io.kestra.plugin.scripts.shell.command
+    command: |
+      - MSYS_NO_PATHCONV=1 docker exec jobmanager /opt/flink/bin/flink run -py /opt/flink/usrlib/velocity_check_job.py
+
+  - id: submit_amount_anomaly
+    type: io.kestra.plugin.scripts.shell.command
+    command: |
+      - MSYS_NO_PATHCONV=1 docker exec jobmanager /opt/flink/bin/flink run -py /opt/flink/usrlib/amount_anomaly_job.py

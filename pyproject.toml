@@ -8,7 +8,6 @@ dependencies = [
     "apache-flink==2.1.0",
     "confluent-kafka>=2.16.1",
     "pandas==2.1.4",
-    "psycopg2>=2.9.13",
     "psycopg2-binary>=2.9.13",
     "pydantic>=2.14.1",
 ]
