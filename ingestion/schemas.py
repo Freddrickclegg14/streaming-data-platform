@@ -1,7 +1,7 @@
 import hashlib
 import math
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -45,7 +45,10 @@ class TransactionEvent(BaseModel):
     @classmethod
     def parse_amount(cls, v):
         if isinstance(v, str):
-            return Decimal(v.replace("$", "").strip())
+            try:
+                return Decimal(v.replace("$", "").strip())
+            except InvalidOperation as e:
+                raise ValueError(f"Invalid amount: {v!r}") from e
         return v
 
     @field_validator("zip_code", mode="before")
