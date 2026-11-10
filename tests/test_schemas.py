@@ -9,7 +9,7 @@ VALID_ROW = {
     "User": 0,
     "Card": 0,
     "Use Chip": "Swipe Transaction",
-    "Merchant Name": "Test Merchant",
+    "Merchant Name": "1234567890",
     "Merchant City": "La Verne",
     "Merchant State": "CA",
     "Zip": "91750.0",
