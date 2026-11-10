@@ -4,16 +4,15 @@ from datetime import datetime
 
 import psycopg2
 from pyflink.common import Duration
+from pyflink.common.restart_strategy import RestartStrategies
+from pyflink.common.serialization import SimpleStringSchema
 from pyflink.common.typeinfo import Types
-from pyflink.common.watermark_strategy import WatermarkStrategy, TimestampAssigner
-from pyflink.datastream import StreamExecutionEnvironment, CheckpointingMode
+from pyflink.common.watermark_strategy import TimestampAssigner, WatermarkStrategy
+from pyflink.datastream import CheckpointingMode, StreamExecutionEnvironment
+from pyflink.datastream.checkpoint_storage import FileSystemCheckpointStorage
+from pyflink.datastream.connectors.kafka import KafkaOffsetsInitializer, KafkaSource
 from pyflink.datastream.functions import KeyedProcessFunction, RuntimeContext
 from pyflink.datastream.state import ListStateDescriptor
-from pyflink.datastream.connectors.kafka import KafkaSource, KafkaOffsetsInitializer
-from pyflink.datastream.checkpoint_storage import FileSystemCheckpointStorage
-from pyflink.common.serialization import SimpleStringSchema
-from pyflink.common.restart_strategy import RestartStrategies
-
 from rules import check_velocity
 
 logging.basicConfig(level=logging.INFO)

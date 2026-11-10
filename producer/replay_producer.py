@@ -1,7 +1,7 @@
+import argparse
 import json
 import logging
-import argparse
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pandas as pd
@@ -35,7 +35,7 @@ def delivery_report(err, msg):
 
 def build_deadletter_record(raw_row: dict, error: Exception) -> dict:
     return {
-        "failed_at": datetime.utcnow().isoformat(),
+        "failed_at": datetime.now(UTC).isoformat(),
         "error_reason": str(error),
         "raw_record": raw_row,
     }

@@ -1,10 +1,9 @@
-# tests/test_schemas.py
 from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
 
-from ingestion.schemas import TransactionEvent, GroundTruthLabel, build_transaction_id
+from ingestion.schemas import GroundTruthLabel, TransactionEvent, build_transaction_id
 
 VALID_ROW = {
     "User": 0,
@@ -32,7 +31,7 @@ def test_valid_row_parses_and_excludes_is_fraud():
 
 def test_malformed_amount_raises():
     bad_row = {**VALID_ROW, "Amount": "not-a-number"}
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         TransactionEvent(
             transaction_id="abc123", event_timestamp="2002-09-01T06:21:00", **bad_row
         )

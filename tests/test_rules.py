@@ -1,5 +1,5 @@
 # tests/test_rules.py
-from flink_jobs.rules import check_velocity, check_amount_anomaly
+from flink_jobs.rules import check_amount_anomaly, check_velocity
 
 
 def test_velocity_violation_triggers_at_threshold():
